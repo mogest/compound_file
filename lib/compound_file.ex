@@ -1,0 +1,2 @@
+defmodule CompoundFile do
+end
