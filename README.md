@@ -19,6 +19,8 @@ Then, run `mix deps.get` to install the dependency.
 
 ## Usage
 
+Documentation available at [https://hexdocs.pm/compound_file](https://hexdocs.pm/compound_file).
+
 Constructing a CFBF file might look something like this:
 
 ```elixir
