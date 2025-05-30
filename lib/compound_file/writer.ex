@@ -8,20 +8,20 @@ defmodule CompoundFile.Writer do
   ## Example usage
 
       iex> alias CompoundFile.Writer
-      iex> document = Writer.new()
-      iex> document = Writer.add_stream(document, nil, "example.txt", "Hello, World!")
-      iex> {document, dir} = Writer.add_storage(document, nil, "DirectoryA")
-      iex> document = Writer.add_stream(document, dir, "example2.txt", "Another file")
-      iex> {:ok, _binary} = Writer.render(document)
+      iex> Writer.new()
+      iex> |> Writer.add_file("example.txt", "Hello, World!")
+      iex> |> Writer.add_file("data/text/example2.txt", "Another file")
+      iex> |> Writer.render()
+      {:ok, <<...>>}
 
   This will create a new Compound File Document with the following files:
 
     - `/example.txt`
-    - `/DirectoryA/example2.txt`
+    - `/data/text/example2.txt`
   """
 
-  alias CompoundFile.Document
-  alias CompoundFile.File
+  alias CompoundFile.Writer.Document
+  alias CompoundFile.Writer.Object
 
   @sector_size 512
   @mini_sector_size 64
@@ -32,9 +32,45 @@ defmodule CompoundFile.Writer do
   @endofchain 0xFFFFFFFE
   @nostream 0xFFFFFFFF
 
+  @doc "Initialises a new, empty Compound File Document."
   @spec new :: Document.t()
   def new, do: %Document{}
 
+  @doc """
+  Adds a file to the Compound File Document.
+
+  If the directory structure specified in the `path` does not exist, directories (storage objects)
+  will be created as needed. The file will then be added as a stream object.
+
+  Returns the updated document.
+  """
+  @spec add_file(Document.t(), String.t(), binary()) :: Document.t()
+  def add_file(document, path, data) do
+    {filename, dirs} = Path.split(path) |> List.pop_at(-1)
+
+    {document, parent} =
+      Enum.reduce(dirs, {document, 0}, fn dir, {document, parent} ->
+        case Enum.find(
+               document.objects,
+               &(&1.name == dir and &1.parent == parent and &1.storage?)
+             ) do
+          nil -> add_storage(document, parent, dir)
+          object -> {document, object.id}
+        end
+      end)
+
+    add_stream(document, parent, filename, data)
+  end
+
+  @doc """
+  Adds a stream object to the Compound File Document.
+
+  This function is used to add a binary stream to the document.  The stream object is added to the
+  either the root directory (when `parent` is `nil`) or to the specified parent directory (by
+  passing the storage object's ID as `parent`).
+
+  Returns the updated document.
+  """
   @spec add_stream(Document.t(), non_neg_integer() | nil, String.t(), binary()) :: Document.t()
   def add_stream(document, parent, filename, data) do
     {document, start_sector} =
@@ -44,22 +80,32 @@ defmodule CompoundFile.Writer do
         true -> add_to_fat(document, data)
       end
 
-    new_file = %File{
-      id: length(document.files) + 1,
+    new_object = %Object{
+      id: length(document.objects) + 1,
       name: filename,
       start_sector: start_sector,
       size: byte_size(data),
+      storage?: false,
       parent: parent || 0
     }
 
-    %{document | files: [new_file | document.files]}
+    %{document | objects: [new_object | document.objects]}
   end
 
+  @doc """
+  Adds a storage object (directory) to the Compound File Document.
+
+  This function creates a new storage entry in the document. The storage object can be used to group
+  files (stream objects) together. The `parent` parameter specifies the parent storage object ID, or
+  `nil` for the root directory. The `filename` is the name of the storage object.
+
+  Returns a tuple of the updated document and the object ID of the new storage object.
+  """
   @spec add_storage(Document.t(), non_neg_integer() | nil, String.t()) ::
-          {Document.t(), pos_integer()}
+          {Document.t(), object_id :: pos_integer()}
   def add_storage(document, parent, filename) do
-    new_file = %File{
-      id: length(document.files) + 1,
+    new_object = %Object{
+      id: length(document.objects) + 1,
       name: filename,
       start_sector: 0,
       size: 0,
@@ -67,46 +113,57 @@ defmodule CompoundFile.Writer do
       parent: parent || 0
     }
 
-    {%{document | files: [new_file | document.files]}, new_file.id}
+    {%{document | objects: [new_object | document.objects]}, new_object.id}
   end
 
-  @spec render(Document.t()) :: {:ok, binary()}
-  def render(document) do
+  @doc """
+  Renders the Compound File Document to a binary format.
+
+  Returns `{:ok, binary()}` containing the complete binary representation of the document.
+  You can write this binary to a file or use it as needed.
+  """
+  @spec render(Document.t()) ::
+          {:ok, binary} | {:error, :empty | :file_size_limit_exceeded | :filename_too_long}
+  def render(%Document{} = document) do
     {document, first_mini_stream_sector} = add_to_fat(document, document.mini_stream)
 
-    {document, first_directory_sector} =
-      add_to_fat(
-        document,
-        build_directory(document, first_mini_stream_sector, byte_size(document.mini_stream))
-      )
+    case build_directory(document, first_mini_stream_sector, byte_size(document.mini_stream)) do
+      {:ok, directory_sectors} ->
+        {document, first_directory_sector} = add_to_fat(document, directory_sectors)
 
-    mini_fat = IO.iodata_to_binary(document.mini_fat) |> pad_to_sectors(0xFF)
-    mini_fat_sector_count = byte_size(mini_fat) |> div(@sector_size)
+        mini_fat = IO.iodata_to_binary(document.mini_fat) |> pad_to_sectors(0xFF)
+        mini_fat_sector_count = byte_size(mini_fat) |> div(@sector_size)
 
-    {document, first_mini_fat_sector} = add_to_fat(document, mini_fat)
+        {document, first_mini_fat_sector} = add_to_fat(document, mini_fat)
 
-    result = add_fat_to_fat_and_complete_sectors(document)
+        result = add_fat_to_fat_and_complete_sectors(document)
 
-    header =
-      build_header(
-        first_directory_sector,
-        first_mini_fat_sector,
-        mini_fat_sector_count,
-        result.fat_sector_count,
-        result.header_difat,
-        result.first_difat_sector,
-        result.difat_sector_count
-      )
+        header =
+          build_header(
+            first_directory_sector,
+            first_mini_fat_sector,
+            mini_fat_sector_count,
+            result.fat_sector_count,
+            result.header_difat,
+            result.first_difat_sector,
+            result.difat_sector_count
+          )
 
-    {:ok, header <> result.binary}
+        {:ok, header <> result.binary}
+
+      error ->
+        error
+    end
   end
 
-  defp build_directory(document, first_mini_stream_sector, mini_stream_size) do
-    files = Enum.reverse(document.files)
-    tree = build_tree(files)
-    links = flatten_tree(tree)
+  defp build_directory(document, first_mini_stream_sector, mini_stream_size)
+  defp build_directory(%{objects: []}, _, _), do: {:error, :empty}
 
-    root_entry =
+  defp build_directory(document, first_mini_stream_sector, mini_stream_size) do
+    objects = Enum.reverse(document.objects)
+    links = build_directory_tree_links(objects)
+
+    {:ok, root_entry} =
       create_directory_entry(
         "Root Entry",
         5,
@@ -117,39 +174,44 @@ defmodule CompoundFile.Writer do
         @nostream
       )
 
-    entries =
-      Enum.map(files, fn file ->
-        %{child: child, left: left, right: right} = Map.fetch!(links, file.id)
+    map_while_ok(objects, fn object ->
+      %{child: child, left: left, right: right} = Map.fetch!(links, object.id)
 
-        create_directory_entry(
-          file.name,
-          if(file.storage?, do: 1, else: 2),
-          file.start_sector,
-          file.size,
-          child || @nostream,
-          left || @nostream,
-          right || @nostream
-        )
-      end)
+      create_directory_entry(
+        object.name,
+        if(object.storage?, do: 1, else: 2),
+        object.start_sector,
+        object.size,
+        child || @nostream,
+        left || @nostream,
+        right || @nostream
+      )
+    end)
+    |> case do
+      {:ok, entries} ->
+        {:ok, IO.iodata_to_binary([root_entry, entries, directory_padding(entries)])}
 
+      error ->
+        error
+    end
+  end
+
+  defp directory_padding(entries) do
     pad_count =
       case rem(length(entries) + 1, 4) do
         0 -> 0
         rem -> 4 - rem
       end
 
-    pad =
-      Enum.map(1..pad_count//1, fn _ ->
-        create_directory_entry("", 0, 0, 0, @nostream, @nostream, @nostream)
-      end)
-
-    IO.iodata_to_binary([root_entry, entries, pad])
-    |> pad_to_sectors(0)
+    Enum.map(1..pad_count//1, fn _ ->
+      {:ok, entry} = create_directory_entry("", 0, 0, 0, @nostream, @nostream, @nostream)
+      entry
+    end)
   end
 
-  defp build_tree(files) do
-    tree = Enum.group_by(files, & &1.parent) |> build_tree(0)
-    {{0, tree}, nil, nil}
+  defp build_directory_tree_links(objects) do
+    tree = Enum.group_by(objects, & &1.parent) |> build_tree(0)
+    flatten_tree({{0, tree}, nil, nil})
   end
 
   defp build_tree(by_parent, parent_id) do
@@ -242,11 +304,6 @@ defmodule CompoundFile.Writer do
     # If we've undercounted the number of FAT sectors the first time around, we need to re-run this
     # algorithm with some additional sectors.
     if new_fat_sector_count > presumptive_fat_sector_count do
-      # TODO : remove debug
-      IO.puts(
-        "Recalculating FAT sector count: #{new_fat_sector_count} > #{presumptive_fat_sector_count}"
-      )
-
       calculate_fat_sector_count(fat, new_fat_sector_count - presumptive_fat_sector_count)
     else
       {new_fat_sector_count, div(fat_fat_bytes, 4), difat_sector_count}
@@ -381,12 +438,8 @@ defmodule CompoundFile.Writer do
   end
 
   defp create_directory_entry(name, type, start_sector, size, child, left_sibling, right_sibling) do
-    if size > 2_147_483_647, do: raise("Max file size of 2GB")
-
-    # Convert name to UTF-16LE
     {utf16_name, name_length} =
       if name == "" do
-        # 64 bytes of zeros
         {<<0::512>>, 0}
       else
         utf16 = :unicode.characters_to_binary(name, :utf8, {:utf16, :little})
@@ -395,34 +448,44 @@ defmodule CompoundFile.Writer do
         {padded, byte_size(null_terminated)}
       end
 
-    <<
-      # Name (64 bytes, UTF-16LE)
-      utf16_name::binary-64,
-      # Name length (including null terminator)
-      name_length::little-16,
-      # Entry type (1=storage, 2=stream, 5=root)
-      type::8,
-      # Node color (0=red, 1=black) 
-      if(name == "", do: 0, else: 1),
-      # Left sibling directory entry
-      left_sibling::little-32,
-      # Right sibling directory entry
-      right_sibling::little-32,
-      # Child directory entry
-      child::little-32,
-      # CLSID (16 bytes)
-      0::128,
-      # State bits
-      0::little-32,
-      # Creation time
-      0::little-64,
-      # Modified time  
-      0::little-64,
-      # Start sector
-      start_sector::little-32,
-      # Size (8 bytes)
-      size::little-64
-    >>
+    cond do
+      size > 2_147_483_647 ->
+        {:error, :file_size_limit_exceeded}
+
+      name_length > 64 ->
+        {:error, :filename_too_long}
+
+      true ->
+        {:ok,
+         <<
+           # Name (64 bytes, UTF-16LE)
+           utf16_name::binary-64,
+           # Name length (including null terminator)
+           name_length::little-16,
+           # Entry type (1=storage, 2=stream, 5=root)
+           type::8,
+           # Node color (0=red, 1=black) 
+           if(name == "", do: 0, else: 1),
+           # Left sibling directory entry
+           left_sibling::little-32,
+           # Right sibling directory entry
+           right_sibling::little-32,
+           # Child directory entry
+           child::little-32,
+           # CLSID (16 bytes)
+           0::128,
+           # State bits
+           0::little-32,
+           # Creation time
+           0::little-64,
+           # Modified time  
+           0::little-64,
+           # Start sector
+           start_sector::little-32,
+           # Size (8 bytes)
+           size::little-64
+         >>}
+    end
   end
 
   defp pad_to_size(data, target_size, _byte) when byte_size(data) >= target_size, do: data
@@ -430,5 +493,18 @@ defmodule CompoundFile.Writer do
   defp pad_to_size(data, target_size, byte) do
     padding_needed = target_size - byte_size(data)
     data <> :binary.copy(<<byte>>, padding_needed)
+  end
+
+  defp map_while_ok(enum, fun) do
+    Enum.reduce_while(enum, {:ok, []}, fn item, {:ok, acc} ->
+      case fun.(item) do
+        {:ok, value} -> {:cont, {:ok, [value | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      error -> error
+    end
   end
 end

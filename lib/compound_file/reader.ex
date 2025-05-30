@@ -2,11 +2,28 @@ defmodule CompoundFile.Reader do
   @moduledoc """
   Reader for Compound File Binary (CFB) formatted files.
 
-  It is very, very slow for large files.
+  This module is in its infancy, and will respond to errors in the file by crashing.  If you are
+  going to use this module, please assume that some point in the future these functions will
+  return `{:error, reason}` instead of crashing.
+
+  It is also very, very slow working with large files.
+
+  Please contribute to the project if you'd like to use this module in production!
   """
 
-  @doc "List all streams in a compound file."
-  def streams(bin) do
+  alias CompoundFile.Reader.FileEntry
+
+  @doc """
+  List all files in a compound file.
+
+  Note that passing invalid CFB files to this function will result in an exception or unpredictable behavior.
+
+  Returns `{:ok, [FileEntry.t()]}` with a list of file entries.
+
+  Use `CompoundFile.Reader.file_data/2` to get the data from a file entry.
+  """
+  @spec files(binary) :: {:ok, [FileEntry.t()]}
+  def files(bin) do
     entries_by_id = parse_directory(bin) |> Map.new(fn entry -> {entry.id, entry} end)
     mini_stream_sector = Map.fetch!(entries_by_id, 0).start_sector
 
@@ -14,7 +31,7 @@ defmodule CompoundFile.Reader do
     |> find_streams()
     |> Enum.reverse()
     |> Enum.map(fn {path, entry} ->
-      %{
+      %FileEntry{
         path: path,
         start_sector: entry.start_sector,
         size: entry.size,
@@ -24,15 +41,21 @@ defmodule CompoundFile.Reader do
         mini_stream_sector: if(entry.size < 4096, do: mini_stream_sector)
       }
     end)
+    |> then(&{:ok, &1})
   end
 
   @doc """
-  Get the data of a stream by using its stream entry.
+  Get the data of a file by using its file entry.
 
-  You can get the stream entry by calling `CompoundFile.Reader.streams/1`.
+  Note that passing invalid CFB files to this function will result in an exception or unpredictable behavior.
+
+  You can get a file entry by calling `CompoundFile.Reader.files/1`.
+
+  Returns `{:ok, binary}` with the file data.
   """
-  def stream_data(bin, entry),
-    do: stream_data(bin, entry.start_sector, entry.size, entry.mini_stream_sector)
+  @spec file_data(binary, FileEntry.t()) :: {:ok, binary}
+  def file_data(bin, entry),
+    do: {:ok, stream_data(bin, entry.start_sector, entry.size, entry.mini_stream_sector)}
 
   defp stream_data(bin, start_sector, size, nil) do
     read_sector_chain(bin, start_sector)
@@ -54,6 +77,7 @@ defmodule CompoundFile.Reader do
     |> binary_part(0, size)
   end
 
+  @doc false
   def parse_header(bin) do
     <<
       signature::little-64,
@@ -96,6 +120,7 @@ defmodule CompoundFile.Reader do
     }
   end
 
+  @doc false
   def read_sector_chain(bin, first_sector) do
     # Parse FAT sector locations from header
     header = parse_header(bin)
@@ -153,6 +178,7 @@ defmodule CompoundFile.Reader do
     end
   end
 
+  @doc false
   def parse_directory(bin) do
     header = parse_header(bin)
 

@@ -1,4 +1,11 @@
 defmodule CompoundFile.Debug do
+  @moduledoc """
+  Debugging utilities for the Compound File structure.
+
+  Used while developing and testing the library, but kept in case you'd like to inspect the
+  internals of a compound file.
+  """
+
   alias CompoundFile.Reader
 
   def print_header(bin) do
@@ -68,7 +75,11 @@ defmodule CompoundFile.Debug do
         |> Enum.chunk_every(2)
         |> Enum.map_join(" ", &Enum.join(&1, ""))
 
-      ascii = Enum.map(row, fn b -> if b in 32..126, do: <<b>>, else: "." end) |> Enum.join()
+      ascii =
+        Enum.map_join(row, "", fn
+          b when b in 32..126 -> <<b>>
+          _ -> "."
+        end)
 
       hex =
         String.pad_trailing(hex, 47) |> String.split_at(19) |> Tuple.to_list() |> Enum.join(" ")
