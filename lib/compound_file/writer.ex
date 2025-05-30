@@ -8,11 +8,11 @@ defmodule CompoundFile.Writer do
   ## Example usage
 
       iex> alias CompoundFile.Writer
+      iex>
       iex> Writer.new()
       iex> |> Writer.add_file("example.txt", "Hello, World!")
       iex> |> Writer.add_file("data/text/example2.txt", "Another file")
       iex> |> Writer.render()
-      {:ok, <<...>>}
 
   This will create a new Compound File Document with the following files:
 

@@ -12,11 +12,14 @@ defmodule CompoundFile do
 
       iex> alias CompoundFile.{Reader, Writer}
       iex>
-      iex> {:ok, binary} = Writer.new()
-      iex> |> Writer.add_file("example.txt", "Hello, World!")
-      iex> |> Writer.render()
-      iex> {:ok, read_doc} = CompoundFile.Reader.read(bin)
-      iex> CompoundFile.Reader.get_stream(read_doc, "example.txt")
+      iex> {:ok, binary} =
+      iex>   Writer.new()
+      iex>   |> Writer.add_file("example.txt", "Hello, World!")
+      iex>   |> Writer.render()
+      iex>
+      iex> {:ok, [entry]} = Reader.files(binary)
+      iex>
+      iex> Reader.file_data(binary, entry)
       {:ok, "Hello, World!"}
   """
 end

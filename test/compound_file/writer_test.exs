@@ -1,6 +1,8 @@
 defmodule CompoundFile.WriterTest do
   use ExUnit.Case
 
+  doctest CompoundFile.Writer
+
   alias CompoundFile.Reader
   alias CompoundFile.Writer
 
